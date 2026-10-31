@@ -16,18 +16,20 @@
 
   // Mobile nav
   var burger = document.querySelector(".burger");
+  function setNav(open) {
+    document.body.classList.toggle("nav-open", open);
+    burger.setAttribute("aria-expanded", open ? "true" : "false");
+    burger.setAttribute("aria-label", open ? "Close menu" : "Open menu");
+    document.querySelectorAll("main, footer, .mbar, .topbar").forEach(function (el) {
+      if (open) el.setAttribute("inert", ""); else el.removeAttribute("inert");
+    });
+  }
   if (burger) {
-    burger.addEventListener("click", function () {
-      var open = document.body.classList.toggle("nav-open");
-      burger.setAttribute("aria-expanded", open ? "true" : "false");
-    });
+    burger.addEventListener("click", function () { setNav(!document.body.classList.contains("nav-open")); });
     document.addEventListener("keydown", function (e) {
-      if (e.key === "Escape" && document.body.classList.contains("nav-open")) {
-        document.body.classList.remove("nav-open");
-        burger.setAttribute("aria-expanded", "false");
-        burger.focus();
-      }
+      if (e.key === "Escape" && document.body.classList.contains("nav-open")) { setNav(false); burger.focus(); }
     });
+    window.addEventListener("resize", function () { if (window.innerWidth > 960 && document.body.classList.contains("nav-open")) setNav(false); });
   }
 
   // Services dropdown (click to toggle; hover handled in CSS on desktop)
@@ -38,7 +40,10 @@
       btn.setAttribute("aria-expanded", open ? "true" : "false");
     });
     li.addEventListener("keydown", function (e) {
-      if (e.key === "Escape") { li.classList.remove("is-open"); btn.setAttribute("aria-expanded", "false"); btn.focus(); }
+      if (e.key === "Escape" && li.classList.contains("is-open")) { e.stopPropagation(); li.classList.remove("is-open"); btn.setAttribute("aria-expanded", "false"); btn.focus(); }
+    });
+    li.addEventListener("mouseleave", function () {
+      if (window.innerWidth > 960) { li.classList.remove("is-open"); btn.setAttribute("aria-expanded", "false"); }
     });
     document.addEventListener("click", function (e) {
       if (!li.contains(e.target) && window.innerWidth > 960) { li.classList.remove("is-open"); btn.setAttribute("aria-expanded", "false"); }
@@ -65,16 +70,23 @@
   // Footer year
   document.querySelectorAll("[data-year]").forEach(function (el) { el.textContent = new Date().getFullYear(); });
 
-  // Prefill service from ?service= on contact page
+  // Prefill from the URL: ?service=, ?offer=single-mom, ?error=1
   try {
-    var qs = new URLSearchParams(location.search).get("service");
+    var params = new URLSearchParams(location.search);
+    var qs = params.get("service");
     if (qs) document.querySelectorAll('select[name="service"]').forEach(function (s) {
       for (var i = 0; i < s.options.length; i++) if (s.options[i].value === qs) s.selectedIndex = i;
     });
+    if (params.get("offer") === "single-mom") document.querySelectorAll('input[name="single_mom"]').forEach(function (c) { c.checked = true; });
+    if (params.get("error")) document.querySelectorAll("[data-error-banner]").forEach(function (b) { b.hidden = false; });
   } catch (e) {}
 
-  // Form start time (spam check in send.php)
-  document.querySelectorAll("[data-ts]").forEach(function (el) { el.value = Date.now(); });
+  // Spam timing: measure how long the visitor spent on the form (sent as elapsed ms, so device clocks don't matter)
+  var started = new WeakMap();
+  document.querySelectorAll("form[data-quote]").forEach(function (f) {
+    f.noValidate = true; // JS validation takes over; without JS the browser validates natively
+    f.addEventListener("focusin", function () { if (!started.has(f)) started.set(f, Date.now()); });
+  });
 
   // File input label
   document.querySelectorAll(".file-input input").forEach(function (inp) {
@@ -82,7 +94,8 @@
       var span = inp.parentNode.querySelector("[data-file-label]");
       if (!span) return;
       var n = inp.files ? inp.files.length : 0;
-      span.textContent = n ? n + (n === 1 ? " photo selected" : " photos selected") : span.getAttribute("data-default");
+      if (n > 5) span.textContent = "Please choose up to 5 photos (" + n + " selected)";
+      else span.textContent = n ? n + (n === 1 ? " photo selected" : " photos selected") : span.getAttribute("data-default");
     });
   });
 
@@ -90,6 +103,8 @@
   function digits(v) { return (v || "").replace(/\D/g, ""); }
   function validate(form) {
     var ok = true, first = null;
+    var files = form.querySelector('input[type="file"]');
+    if (files && files.files && files.files.length > 5) { files.focus(); return false; }
     form.querySelectorAll("[required]").forEach(function (el) {
       var bad = !el.value.trim();
       if (!bad && el.type === "email") bad = !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(el.value.trim());
@@ -146,14 +161,18 @@
       var endpoint = form.getAttribute("action");
       var done = function () { btn.removeAttribute("aria-busy"); btn.innerHTML = label; };
       if (!endpoint || CFG.formMode === "fallback") { done(); fallback(form); return; }
+      var el = form.querySelector('input[name="elapsed"]');
+      if (el) el.value = started.has(form) ? Date.now() - started.get(form) : 0;
+      var fileInput = form.querySelector('input[type="file"]');
+      var hasFiles = fileInput && fileInput.files && fileInput.files.length;
       var ctrl = "AbortController" in window ? new AbortController() : null;
-      var t = setTimeout(function () { if (ctrl) ctrl.abort(); }, 20000);
-      fetch(endpoint, { method: "POST", body: new FormData(form), headers: { Accept: "application/json" }, signal: ctrl ? ctrl.signal : undefined })
+      var t = setTimeout(function () { if (ctrl) ctrl.abort(); }, hasFiles ? 120000 : 30000);
+      buildData(form)
+        .then(function (fd) { return fetch(endpoint, { method: "POST", body: fd, headers: { Accept: "application/json" }, signal: ctrl ? ctrl.signal : undefined }); })
         .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { return { ok: r.ok, j: j }; }); })
         .then(function (res) {
           clearTimeout(t);
           if (res.ok && res.j && res.j.ok) {
-            try { sessionStorage.setItem("jewell_lead", "1"); } catch (err) {}
             if (window.gtag) window.gtag("event", "generate_lead", { form: form.id || "quote" });
             location.href = form.getAttribute("data-thanks");
           } else { done(); fallback(form); }
@@ -161,6 +180,30 @@
         .catch(function () { clearTimeout(t); done(); fallback(form); });
     });
   });
+
+  // Shrink photos in the browser before upload (phone photos are often 3-8MB each)
+  function shrink(file) {
+    return new Promise(function (resolve) {
+      if (!/^image\/(jpeg|png|webp)$/.test(file.type) || !window.createImageBitmap || !HTMLCanvasElement.prototype.toBlob) return resolve(file);
+      createImageBitmap(file).then(function (bmp) {
+        var max = 1600, sc = Math.min(1, max / Math.max(bmp.width, bmp.height));
+        var c = document.createElement("canvas");
+        c.width = Math.round(bmp.width * sc); c.height = Math.round(bmp.height * sc);
+        c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+        c.toBlob(function (b) { resolve(b && b.size < file.size ? new File([b], file.name.replace(/\.\w+$/, "") + ".jpg", { type: "image/jpeg" }) : file); }, "image/jpeg", 0.82);
+      }).catch(function () { resolve(file); });
+    });
+  }
+  function buildData(form) {
+    var fd = new FormData(form);
+    var inp = form.querySelector('input[type="file"]');
+    if (!inp || !inp.files || !inp.files.length) return Promise.resolve(fd);
+    fd.delete(inp.name);
+    return Promise.all(Array.prototype.slice.call(inp.files, 0, 5).map(shrink)).then(function (files) {
+      files.forEach(function (f) { fd.append(inp.name, f, f.name); });
+      return fd;
+    });
+  }
 
   // Track call / text taps (for analytics once installed)
   document.addEventListener("click", function (e) {
@@ -179,7 +222,7 @@
     var x = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>';
     var l = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m15 18-6-6 6-6"/></svg>';
     var r = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m9 18 6-6-6-6"/></svg>';
-    lb.innerHTML = '<button class="lb-close" aria-label="Close">' + x + '</button><button class="lb-prev" aria-label="Previous photo">' + l + '</button><figure><img alt=""><figcaption></figcaption></figure><button class="lb-next" aria-label="Next photo">' + r + "</button>";
+    lb.innerHTML = '<button class="lb-close" aria-label="Close">' + x + '</button><button class="lb-prev" aria-label="Previous photo">' + l + '</button><figure><img alt="Project photo"><figcaption aria-live="polite"></figcaption></figure><button class="lb-next" aria-label="Next photo">' + r + "</button>";
     document.body.appendChild(lb);
     var img = lb.querySelector("img"), cap = lb.querySelector("figcaption"), idx = 0, lastFocus = null;
     function show(i) {
@@ -187,7 +230,7 @@
       var it = items[idx];
       img.src = it.getAttribute("data-full");
       img.alt = it.getAttribute("data-caption") || "";
-      cap.textContent = it.getAttribute("data-caption") || "";
+      cap.textContent = (it.getAttribute("data-caption") || "") + "  (" + (idx + 1) + " of " + items.length + ")";
     }
     function open(i) { lastFocus = document.activeElement; show(i); lb.classList.add("is-open"); document.body.style.overflow = "hidden"; lb.querySelector(".lb-close").focus(); }
     function close() { lb.classList.remove("is-open"); document.body.style.overflow = ""; if (lastFocus) lastFocus.focus(); }
